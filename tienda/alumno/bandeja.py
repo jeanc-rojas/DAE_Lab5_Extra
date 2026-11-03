@@ -18,53 +18,52 @@ from .verificador import verificar  # noqa: F401
 
 
 class SugerenciaAdmin(admin.ModelAdmin):
-    # TODO(alumno) Parte 2a: la lista de la bandeja.
-    # - list_display con: producto, campo, valor actual ('valor_actual_col'), valor propuesto,
-    #   el veredicto del verificador ('verificacion'), el motivo ('motivo_corto'), origen, estado
-    #   y creado_por.
-    # - list_filter por estado, origen y campo; search_fields por nombre del producto y motivo.
-    list_display = ('__str__', 'estado')
+    list_display = (
+        'producto', 'campo', 'valor_actual_col', 'valor_propuesto', 'verificacion',
+        'motivo_corto', 'origen', 'estado', 'creado_por',
+    )
+    list_filter = ('estado', 'origen', 'campo')
+    search_fields = ('producto__nombre', 'motivo')
     list_select_related = ('producto', 'creado_por')
     actions = ['aprobar_y_aplicar', 'rechazar']
 
-    # TODO(alumno) Parte 2b: qué no se puede escribir a mano.
-    # - Al crear (obj is None): origen, estado, creado_por y los tres campos de la decisión.
-    #   El estado solo lo cambian las acciones; nadie nace «aprobada».
-    # - Al editar (obj existe): además producto, campo, valor_propuesto y motivo. La propuesta
-    #   se aprueba o se rechaza tal como vino; no se retoca.
     def get_readonly_fields(self, request, obj=None):
-        return ['decidido_por', 'decidido_en', 'valor_anterior']
+        siempre = ['origen', 'estado', 'creado_por', 'decidido_por', 'decidido_en', 'valor_anterior']
+        if obj is None:
+            return siempre
+        return ['producto', 'campo', 'valor_propuesto', 'motivo'] + siempre
 
     # Las sugerencias son la bitácora de lo que propuso la IA y de quién lo decidió: no se borran.
     def has_delete_permission(self, request, obj=None):
         return False
 
-    # TODO(alumno) Parte 3b: al CREAR una sugerencia desde el admin, guarda quién la creó
-    # (request.user) y su origen: 'ia' si el usuario es del grupo del agente (es_agente),
-    # 'persona' si no. Luego llama a super().save_model(...).
-    # def save_model(self, request, obj, form, change):
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.creado_por = request.user
+            obj.origen = 'ia' if es_agente(request.user) else 'persona'
+        super().save_model(request, obj, form, change)
 
     @admin.display(description='actual')
     def valor_actual_col(self, obj):
         return obj.valor_actual()
 
-    # TODO(alumno) Parte 2a: la columna del verificador.
-    # '—' si la sugerencia ya no está pendiente; si lo está, '✔ pasa' o '✘ ' seguido de los
-    # problemas que devuelve verificar(), separados por '; '.
     @admin.display(description='verificador')
     def verificacion(self, obj):
-        raise NotImplementedError('TODO(alumno) Parte 2a: columna verificacion')
+        if obj.estado != Sugerencia.PENDIENTE:
+            return '—'
+        problemas = verificar(obj)
+        return '✘ ' + '; '.join(problemas) if problemas else '✔ pasa'
 
-    # TODO(alumno) Parte 2a: el motivo, recortado a 60 caracteres (Truncator(texto).chars(60)).
-    # Ojo: uno de los motivos trae HTML. Tiene que verse como texto en la bandeja.
     @admin.display(description='motivo')
     def motivo_corto(self, obj):
-        raise NotImplementedError('TODO(alumno) Parte 2a: columna motivo_corto')
+        return Truncator(obj.motivo).chars(60)
 
-    # TODO(alumno) Parte 3b: que solo quien tenga el permiso propio 'tienda.aprobar_sugerencia'
-    # vea y pueda ejecutar esta acción. Se hace con permissions=['aprobar'] en el decorador y un
-    # método has_aprobar_permission(self, request) que devuelva True o False.
-    @admin.action(description='Aprobar y aplicar (solo las que pasan el verificador)')
+    def has_aprobar_permission(self, request):
+        return request.user.has_perm('tienda.aprobar_sugerencia')
+
+    @admin.action(
+        description='Aprobar y aplicar (solo las que pasan el verificador)', permissions=['aprobar'],
+    )
     def aprobar_y_aplicar(self, request, queryset):
         """TODO(alumno) Parte 2c. Para cada sugerencia elegida:
 
@@ -77,7 +76,40 @@ class SugerenciaAdmin(admin.ModelAdmin):
         Al final: «N sugerencia(s) aplicada(s).» con messages.SUCCESS.
         Hazlo dentro de `with transaction.atomic():` para que se aplique todo o nada.
         """
-        raise NotImplementedError('TODO(alumno) Parte 2c: acción aprobar_y_aplicar')
+        aplicadas = decididas = 0
+        bloqueadas = []
+        with transaction.atomic():
+            for s in queryset.select_related('producto'):
+                if s.estado != Sugerencia.PENDIENTE:
+                    decididas += 1
+                    continue
+
+                problemas = verificar(s)
+                if problemas:
+                    bloqueadas.append(f'«{s}»: {"; ".join(problemas)}')
+                    continue
+
+                producto = s.producto
+                anterior = getattr(producto, s.campo)
+                nuevo = int(s.valor_propuesto) if s.campo == 'stock' else s.valor_propuesto
+                s.valor_anterior = anterior
+                setattr(producto, s.campo, nuevo)
+                producto.save(update_fields=[s.campo])
+                s.estado = Sugerencia.APROBADA
+                s.decidido_por = request.user
+                s.decidido_en = timezone.now()
+                s.save()
+                self.log_change(request, producto, f'{s.campo}: {anterior} → {nuevo} (sugerencia #{s.pk})')
+                aplicadas += 1
+
+        if aplicadas:
+            self.message_user(request, f'{aplicadas} sugerencia(s) aplicada(s).', messages.SUCCESS)
+        if decididas:
+            self.message_user(
+                request, f'{decididas} sugerencia(s) ya estaba(n) decidida(s).', messages.WARNING,
+            )
+        for texto in bloqueadas:
+            self.message_user(request, f'No se aplicó {texto}. Sigue pendiente.', messages.WARNING)
 
     @admin.action(description='Rechazar', permissions=['change'])
     def rechazar(self, request, queryset):

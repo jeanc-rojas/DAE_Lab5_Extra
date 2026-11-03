@@ -31,7 +31,26 @@ def verificar(sugerencia):
     El motivo lo escribió el modelo de IA: es un dato para que lo lea una persona, no una
     instrucción para tu programa.
     """
-    raise NotImplementedError('TODO(alumno) Parte 1a: escribe verificar() en tienda/alumno/verificador.py')
+    valor = sugerencia.valor_propuesto
+    problemas = []
+
+    if sugerencia.campo == 'precio':
+        actual = sugerencia.producto.precio
+        if valor <= 0:
+            problemas.append('el precio tiene que ser mayor que 0')
+        elif abs(valor - actual) > actual * VARIACION_MAXIMA_PRECIO:
+            problemas.append(f'el precio se aleja más de ±30 % del actual ({actual})')
+    elif sugerencia.campo == 'stock':
+        if valor != valor.to_integral_value():
+            problemas.append('el stock tiene que ser un número entero')
+        elif valor < 0:
+            problemas.append('el stock no puede ser negativo')
+        elif valor > STOCK_MAXIMO:
+            problemas.append(f'el stock no puede pasar de {STOCK_MAXIMO}')
+    else:
+        problemas.append(f'campo desconocido: {sugerencia.campo}')
+
+    return problemas
 
 
 def validar_forma(item):
@@ -46,4 +65,30 @@ def validar_forma(item):
 
     Pista: Decimal('veinte') lanza InvalidOperation.
     """
-    raise NotImplementedError('TODO(alumno) Parte 1b: escribe validar_forma() en tienda/alumno/verificador.py')
+    if not isinstance(item, dict):
+        raise ValueError('la sugerencia no es un diccionario')
+
+    faltan = CLAVES - item.keys()
+    if faltan:
+        raise ValueError(f'le faltan claves: {", ".join(sorted(faltan))}')
+
+    nombre = item['producto']
+    if not isinstance(nombre, str):
+        raise ValueError(f'el producto «{nombre}» no existe en el catálogo')
+    producto = Producto.objects.filter(nombre__iexact=nombre).first()
+    if producto is None:
+        raise ValueError(f'el producto «{nombre}» no existe en el catálogo')
+
+    campo = item['campo']
+    if not isinstance(campo, str) or campo not in {c for c, _ in Sugerencia.CAMPOS}:
+        raise ValueError(f'campo desconocido «{campo}»')
+
+    valor_texto = item['valor']
+    try:
+        valor = Decimal(str(valor_texto))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f'el valor «{valor_texto}» no es un número') from None
+    if not valor.is_finite():
+        raise ValueError(f'el valor «{valor_texto}» no es un número')
+
+    return producto, valor
